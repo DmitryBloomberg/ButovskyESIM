@@ -24,7 +24,7 @@ REGIONS: list[tuple[str, list[str]]] = [
             "Китай", "Япония", "Южная Корея", "Малайзия", "Гонконг", "Таиланд",
             "Вьетнам", "Сингапур", "Макао", "Тайвань", "Мальдивские Острова",
             "Индонезия", "Дубай", "Саудовская Аравия", "Катар", "Индия",
-            "Филипины", "Камбоджа", "Лаос", "Казахстан",
+            "Филиппины", "Камбоджа", "Лаос", "Казахстан",
         ],
     ),
     (
@@ -56,6 +56,54 @@ REGIONS: list[tuple[str, list[str]]] = [
     ("Океания", ["Австралия", "Новая Зеландия"]),
     ("Северная Америка", ["США", "Канада", "Мексика"]),
 ]
+
+REGION_EMOJIS = ["🌏", "🌍", "🌎", "🌍", "🌊", "🌎"]
+COUNTRY_CODES = {
+    "Китай": "CN", "Япония": "JP", "Южная Корея": "KR", "Малайзия": "MY",
+    "Гонконг": "HK", "Таиланд": "TH", "Вьетнам": "VN", "Сингапур": "SG",
+    "Макао": "MO", "Тайвань": "TW", "Мальдивские Острова": "MV",
+    "Индонезия": "ID", "Дубай": "AE", "Саудовская Аравия": "SA", "Катар": "QA",
+    "Индия": "IN", "Филиппины": "PH", "Камбоджа": "KH", "Лаос": "LA",
+    "Казахстан": "KZ", "Испания": "ES", "Италия": "IT", "Франция": "FR",
+    "Германия": "DE", "Турция": "TR", "Великобритания": "GB", "Греция": "GR",
+    "Австрия": "AT", "Хорватия": "HR", "Нидерланды": "NL", "Норвегия": "NO",
+    "Португалия": "PT", "Швеция": "SE", "Дания": "DK", "Швейцария": "CH",
+    "Россия": "RU", "Финляндия": "FI", "Польша": "PL", "Мальта": "MT",
+    "Исландия": "IS", "Бразилия": "BR", "Аргентина": "AR", "Чили": "CL",
+    "Парагвай": "PY", "Уругвай": "UY", "Колумбия": "CO", "Перу": "PE",
+    "Венесуэла": "VE", "Боливия": "BO", "Эквадор": "EC", "Гайана": "GY",
+    "Французская Гвиана": "GF", "Суринам": "SR", "Марокко": "MA", "Египет": "EG",
+    "ЮАР": "ZA", "Тунис": "TN", "Кения": "KE", "Танзания": "TZ", "Гана": "GH",
+    "Эфиопия": "ET", "Кот-д'Ивуар": "CI", "Уганда": "UG", "Руанда": "RW",
+    "Маврикий": "MU", "Мадагаскар": "MG", "Алжир": "DZ", "Гвинея-Бисау": "GW",
+    "Замбия": "ZM", "Бенин": "BJ", "Конго, Демократическая Республика": "CD",
+    "Ангола": "AO", "Австралия": "AU", "Новая Зеландия": "NZ", "США": "US",
+    "Канада": "CA", "Мексика": "MX",
+}
+
+
+def flag_emoji(country_code: str) -> str:
+    """Convert an ISO 3166-1 alpha-2 country/territory code to a flag emoji."""
+    if len(country_code) != 2 or not country_code.isascii() or not country_code.isalpha():
+        return "🏳️"
+    return "".join(chr(0x1F1E6 + ord(letter.upper()) - ord("A")) for letter in country_code)
+
+
+COUNTRY_FLAGS = {name: flag_emoji(code) for name, code in COUNTRY_CODES.items()}
+COUNTRY_FLAGS["Филипины"] = COUNTRY_FLAGS["Филиппины"]  # Preserve flags on existing orders.
+CUSTOM_EMOJI_SLOTS = {
+    "welcome": "Значок приветствия",
+    "shop": "Оформление заказа",
+    "compatibility": "Проверка совместимости",
+    "profile": "Профиль",
+    "orders": "Активные заказы",
+}
+DEFAULT_BUTTON_EMOJIS = {
+    "shop": "🛒",
+    "compatibility": "📱",
+    "profile": "👤",
+    "orders": "📦",
+}
 
 STATUS_LABELS = {
     "new": "Новая заявка",
@@ -207,6 +255,12 @@ def get_settings() -> dict[str, Any]:
     value.setdefault("disabled_regions", [])
     value.setdefault("disabled_countries", {})
     value.setdefault("admin_flow", None)
+    value.setdefault("custom_emojis", {})
+    value.setdefault("emoji_target", None)
+    if not isinstance(value["custom_emojis"], dict):
+        value["custom_emojis"] = {}
+    if value["emoji_target"] not in CUSTOM_EMOJI_SLOTS:
+        value["emoji_target"] = None
     return value
 
 
@@ -236,6 +290,49 @@ def get_user_state(telegram_id: int) -> dict[str, Any] | None:
 def country_is_disabled(region_index: int, country_index: int) -> bool:
     settings = get_settings()
     return str(country_index) in settings["disabled_countries"].get(str(region_index), [])
+
+
+def display_country(country: str) -> str:
+    return f"{COUNTRY_FLAGS.get(country, '🏳️')} {country}"
+
+
+def utf16_slice(text: str, offset: int, length: int) -> str:
+    encoded = text.encode("utf-16-le")
+    return encoded[offset * 2 : (offset + length) * 2].decode("utf-16-le")
+
+
+def button_style(button: dict[str, Any]) -> str:
+    """Choose a Telegram button color based on the action represented."""
+    text = str(button.get("text", "")).casefold()
+    data = str(button.get("callback_data", "")).casefold()
+    if any(word in text for word in ("отмен", "отклон", "блок", "закрыть", "⛔")):
+        return "danger"
+    if any(word in text for word in (
+        "заказать", "оформить", "подтвердить", "включить", "оплатил",
+        "отправить пользователю", "взять в работу",
+    )):
+        return "success"
+    if any(token in data for token in ("cancel", "payno", "block")):
+        return "danger"
+    if data.startswith((
+        "user:new", "submit:", "user:pay:", "adm:take:",
+        "adm:payok:", "adm:instructiondone:",
+    )):
+        return "success"
+    return "primary"
+
+
+def button_emoji_slot(button: dict[str, Any]) -> str | None:
+    data = str(button.get("callback_data", ""))
+    if data == "user:new" or data.startswith("submit:"):
+        return "shop"
+    if data == "user:compat":
+        return "compatibility"
+    if data == "user:profile":
+        return "profile"
+    if data == "user:orders":
+        return "orders"
+    return None
 
 
 class TelegramBot:
@@ -268,12 +365,62 @@ class TelegramBot:
             raise TelegramAPIError(int(result.get("error_code", 0)), str(result.get("description", "Unknown error")))
         return result.get("result")
 
+    def prepare_keyboard(self, keyboard: list[list[dict[str, str]]]) -> list[list[dict[str, str]]]:
+        custom_emojis = get_settings().get("custom_emojis", {})
+        result: list[list[dict[str, str]]] = []
+        for row in keyboard:
+            prepared_row: list[dict[str, str]] = []
+            for original in row:
+                button = dict(original)
+                button.setdefault("style", button_style(button))
+                slot = button_emoji_slot(button)
+                emoji = custom_emojis.get(slot) if slot else None
+                if isinstance(emoji, dict) and emoji.get("custom_emoji_id"):
+                    button["icon_custom_emoji_id"] = str(emoji["custom_emoji_id"])
+                elif slot:
+                    button["text"] = f"{DEFAULT_BUTTON_EMOJIS[slot]} {button.get('text', '')}"
+                prepared_row.append(button)
+            result.append(prepared_row)
+        return result
+
+    def api_with_ui_fallback(self, payload: dict[str, Any]) -> Any:
+        try:
+            return self.api("sendMessage", payload)
+        except TelegramAPIError as exc:
+            markup = payload.get("reply_markup", {})
+            rows = markup.get("inline_keyboard", []) if isinstance(markup, dict) else []
+            has_button_extras = any(
+                "style" in button or "icon_custom_emoji_id" in button
+                for row in rows for button in row
+            )
+            if exc.code != 400 or (not has_button_extras and "entities" not in payload):
+                raise
+            fallback = dict(payload)
+            fallback.pop("entities", None)
+            if has_button_extras:
+                fallback_markup = dict(markup)
+                fallback_markup["inline_keyboard"] = [
+                    [
+                        {
+                            key: value
+                            for key, value in button.items()
+                            if key not in {"style", "icon_custom_emoji_id"}
+                        }
+                        for button in row
+                    ]
+                    for row in rows
+                ]
+                fallback["reply_markup"] = fallback_markup
+            log("Telegram rejected optional button styling/custom emoji; retrying with standard buttons.")
+            return self.api("sendMessage", fallback)
+
     def send(
         self,
         chat_id: int,
         text: str,
         keyboard: list[list[dict[str, str]]] | None = None,
         reply_markup: dict[str, Any] | None = None,
+        entities: list[dict[str, Any]] | None = None,
     ) -> Any:
         payload: dict[str, Any] = {
             "chat_id": chat_id,
@@ -281,10 +428,12 @@ class TelegramBot:
             "disable_web_page_preview": True,
         }
         if keyboard is not None:
-            payload["reply_markup"] = {"inline_keyboard": keyboard}
+            payload["reply_markup"] = {"inline_keyboard": self.prepare_keyboard(keyboard)}
         elif reply_markup is not None:
             payload["reply_markup"] = reply_markup
-        return self.api("sendMessage", payload)
+        if entities:
+            payload["entities"] = entities
+        return self.api_with_ui_fallback(payload)
 
     def answer_callback(self, query_id: str, text: str | None = None, alert: bool = False) -> None:
         payload: dict[str, Any] = {"callback_query_id": query_id}
@@ -310,7 +459,7 @@ class TelegramBot:
             "message_id": message_id,
         }
         if keyboard is not None:
-            payload["reply_markup"] = {"inline_keyboard": keyboard}
+            payload["reply_markup"] = {"inline_keyboard": self.prepare_keyboard(keyboard)}
         return self.api("copyMessage", payload)
 
     def handle_update(self, update: dict[str, Any]) -> None:
@@ -335,13 +484,16 @@ class TelegramBot:
             self.start_user(sender)
             return
         if text == "/cancel":
-            if telegram_id == self.admin_id and get_settings().get("admin_flow"):
-                settings = get_settings()
+            settings = get_settings() if telegram_id == self.admin_id else {}
+            if telegram_id == self.admin_id and (
+                settings.get("admin_flow") or settings.get("emoji_target")
+            ):
                 settings["admin_flow"] = None
+                settings["emoji_target"] = None
                 save_settings(settings)
                 self.send(
                     telegram_id,
-                    "Текущий этап заказа сброшен.",
+                    "Текущий этап сброшен.",
                     [[{"text": "Админ-панель", "callback_data": "admin:home"}]],
                 )
                 return
@@ -458,10 +610,10 @@ class TelegramBot:
             self.start_user({"id": telegram_id})
             return
         keyboard = [
-            [{"text": "Заказать E-SIM", "callback_data": "user:new"}],
-            [{"text": "Проверка совместимости", "callback_data": "user:compat"}],
+            [{"text": "Заказать eSIM", "callback_data": "user:new"}],
+            [{"text": "Проверить совместимость", "callback_data": "user:compat"}],
             [{"text": "Профиль", "callback_data": "user:profile"}],
-            [{"text": "Активные заказы", "callback_data": "user:orders"}],
+            [{"text": "Мои заказы", "callback_data": "user:orders"}],
         ]
         if telegram_id == self.admin_id:
             keyboard.append([{"text": "Админ-панель", "callback_data": "admin:home"}])
@@ -470,11 +622,36 @@ class TelegramBot:
             for order in all_orders()
             if int(order["user_id"]) == telegram_id and order.get("status") in ACTIVE_STATUSES
         )
+        settings = get_settings()
+        welcome = settings.get("custom_emojis", {}).get("welcome", {})
+        welcome_text = str(welcome.get("emoji", "✨")) if isinstance(welcome, dict) else "✨"
+        entities = None
+        if isinstance(welcome, dict) and welcome.get("custom_emoji_id"):
+            entities = [{
+                "type": "custom_emoji",
+                "offset": 0,
+                "length": len(welcome_text.encode("utf-16-le")) // 2,
+                "custom_emoji_id": str(welcome["custom_emoji_id"]),
+            }]
+        first_name = str(user.get("name") or "").strip()
+        greeting = f", {first_name}" if first_name else ""
+        home_text = (
+            f"{welcome_text} Добро пожаловать в ButovskyESIM{greeting}!\n"
+            "Интернет в поездках — без физической SIM-карты.\n\n"
+            "Преимущества:\n"
+            "🌍 Направления для поездок по всему миру\n"
+            "📦 Выбор срока и пакета трафика под поездку\n"
+            "📱 Проверка совместимости устройства до заказа\n"
+            "💬 Заказ, оплата и инструкции — в одном чате\n\n"
+            f"📬 Активных заказов: {active_count}\n\n"
+            f"{DISCLAIMER}"
+        )
         self.send(
             telegram_id,
-            f"Главное меню\nАктивных заказов: {active_count}\n\n{DISCLAIMER}",
+            home_text,
             keyboard,
             reply_markup={"remove_keyboard": True},
+            entities=entities,
         )
 
     def handle_callback(self, query: dict[str, Any]) -> None:
@@ -555,7 +732,7 @@ class TelegramBot:
         keyboard = [
             [
                 {
-                    "text": f"{'⛔ ' if index in disabled else ''}{region}",
+                    "text": f"{'⛔ ' if index in disabled else ''}{REGION_EMOJIS[index]} {region}",
                     "callback_data": f"region:{index}",
                 }
             ]
@@ -592,7 +769,7 @@ class TelegramBot:
             keyboard.append(
                 [
                     {
-                        "text": prefix + country,
+                        "text": prefix + display_country(country),
                         "callback_data": f"country:{region_index}:{country_index}",
                     }
                 ]
@@ -610,7 +787,11 @@ class TelegramBot:
             keyboard.append(nav)
         keyboard.append([{"text": "К направлениям", "callback_data": "user:new"}])
         keyboard.append([{"text": "Отмена", "callback_data": "user:cancel"}])
-        self.send(telegram_id, f"Направление: {region_name}\nВыберите страну:", keyboard)
+        self.send(
+            telegram_id,
+            f"{REGION_EMOJIS[region_index]} Направление: {region_name}\nВыберите страну:",
+            keyboard,
+        )
 
     def select_country(self, telegram_id: int, region_index: int, country_index: int) -> None:
         if not 0 <= region_index < len(REGIONS):
@@ -630,7 +811,7 @@ class TelegramBot:
         self.send(
             telegram_id,
             f"Направление: {REGIONS[region_index][0]}\n"
-            f"Страна: {countries[country_index]}\n\n"
+            f"Страна: {display_country(countries[country_index])}\n\n"
             f"{DISCLAIMER}",
             keyboard,
         )
@@ -678,7 +859,7 @@ class TelegramBot:
             f"Telegram ID: {telegram_id}\n"
             f"Телефон: {user.get('phone') or 'не указан'}\n"
             f"Направление: {order['region']}\n"
-            f"Страна: {order['country']}"
+            f"Страна: {display_country(order['country'])}"
         )
         admin_keyboard = [[{"text": "Взять в работу", "callback_data": f"adm:take:{order_id}"}]]
         try:
@@ -752,7 +933,7 @@ class TelegramBot:
         lines = ["Активные заказы:"]
         for order in sorted(orders, key=lambda item: int(item["id"]), reverse=True):
             lines.append(
-                f"#{order['id']} — {order['region']}, {order['country']} — "
+                f"#{order['id']} — {order['region']}, {display_country(order['country'])} — "
                 f"{STATUS_LABELS.get(order['status'], order['status'])}"
             )
             keyboard.append(
@@ -768,7 +949,7 @@ class TelegramBot:
         lines = [
             f"Заказ #{order_id}",
             f"Направление: {order['region']}",
-            f"Страна: {order['country']}",
+            f"Страна: {display_country(order['country'])}",
             f"Статус: {STATUS_LABELS.get(order['status'], order['status'])}",
         ]
         if order.get("period_days"):
@@ -842,9 +1023,89 @@ class TelegramBot:
             [{"text": "Все заказы", "callback_data": "adm:orders:0"}],
             [{"text": "Доступность направлений", "callback_data": "adm:regions"}],
             [{"text": "Доступность стран", "callback_data": "adm:countryregions"}],
+            [{"text": "Premium-эмодзи", "callback_data": "adm:emojis"}],
             [{"text": "Главное меню", "callback_data": "user:home"}],
         ]
-        self.send(telegram_id, "Админ-панель", keyboard)
+        self.send(telegram_id, "⚙️ Админ-панель", keyboard)
+
+    def show_custom_emoji_settings(self, telegram_id: int) -> None:
+        self.require_admin(telegram_id)
+        configured = get_settings().get("custom_emojis", {})
+        keyboard: list[list[dict[str, str]]] = []
+        lines = [
+            "Настройте собственные Premium-эмодзи для приветствия и кнопок.",
+            "Выберите назначение, затем отправьте нужный эмодзи отдельным сообщением.",
+        ]
+        for slot, label in CUSTOM_EMOJI_SLOTS.items():
+            emoji = configured.get(slot, {}) if isinstance(configured, dict) else {}
+            sample = str(emoji.get("emoji", "—")) if isinstance(emoji, dict) else "—"
+            lines.append(f"{sample} {label}: {'установлен' if sample != '—' else 'не задан'}")
+            keyboard.append([{"text": f"Задать · {label}", "callback_data": f"adm:emojiset:{slot}"}])
+            if isinstance(emoji, dict) and emoji.get("custom_emoji_id"):
+                keyboard.append([{"text": f"Убрать · {label}", "callback_data": f"adm:emojiclear:{slot}"}])
+        keyboard.append([{"text": "К админ-панели", "callback_data": "admin:home"}])
+        self.send(telegram_id, "\n".join(lines), keyboard)
+
+    def begin_custom_emoji_setup(self, telegram_id: int, slot: str) -> None:
+        self.require_admin(telegram_id)
+        if slot not in CUSTOM_EMOJI_SLOTS:
+            raise UserAlert("Назначение эмодзи не найдено.")
+        settings = get_settings()
+        settings["emoji_target"] = slot
+        save_settings(settings)
+        self.send(
+            telegram_id,
+            f"Отправьте одним сообщением Premium-эмодзи для пункта «{CUSTOM_EMOJI_SLOTS[slot]}».\n"
+            "Нужен custom emoji из панели эмодзи Telegram. Для отмены отправьте /cancel.",
+        )
+
+    def clear_custom_emoji(self, telegram_id: int, slot: str) -> None:
+        self.require_admin(telegram_id)
+        if slot not in CUSTOM_EMOJI_SLOTS:
+            raise UserAlert("Назначение эмодзи не найдено.")
+        settings = get_settings()
+        settings.setdefault("custom_emojis", {}).pop(slot, None)
+        save_settings(settings)
+        self.show_custom_emoji_settings(telegram_id)
+
+    def collect_custom_emoji(self, message: dict[str, Any]) -> None:
+        settings = get_settings()
+        slot = settings.get("emoji_target")
+        if slot not in CUSTOM_EMOJI_SLOTS:
+            settings["emoji_target"] = None
+            save_settings(settings)
+            self.send(self.admin_id, "Назначение эмодзи сброшено. Откройте раздел Premium-эмодзи в админ-панели.")
+            return
+        text = str(message.get("text", ""))
+        entity = next(
+            (
+                item for item in message.get("entities", [])
+                if item.get("type") == "custom_emoji" and item.get("custom_emoji_id")
+            ),
+            None,
+        )
+        if not entity:
+            self.send(
+                self.admin_id,
+                "В сообщении не найден Premium-эмодзи. Выберите custom emoji в Telegram и отправьте его ещё раз.",
+            )
+            return
+        try:
+            emoji_text = utf16_slice(text, int(entity["offset"]), int(entity["length"]))
+        except (KeyError, TypeError, ValueError, UnicodeDecodeError):
+            emoji_text = ""
+        custom_emoji_id = str(entity.get("custom_emoji_id", ""))
+        if not emoji_text or not custom_emoji_id:
+            self.send(self.admin_id, "Не удалось прочитать этот эмодзи. Попробуйте отправить его ещё раз.")
+            return
+        settings.setdefault("custom_emojis", {})[slot] = {
+            "custom_emoji_id": custom_emoji_id,
+            "emoji": emoji_text,
+        }
+        settings["emoji_target"] = None
+        save_settings(settings)
+        self.send(self.admin_id, f"Premium-эмодзи сохранён: {emoji_text}")
+        self.show_custom_emoji_settings(self.admin_id)
 
     def route_admin_callback(self, telegram_id: int, parts: list[str]) -> None:
         self.require_admin(telegram_id)
@@ -885,6 +1146,12 @@ class TelegramBot:
             self.show_status_choices(telegram_id, int(parts[2]))
         elif action == "setstatus" and len(parts) == 4:
             self.set_order_status(telegram_id, int(parts[2]), parts[3])
+        elif action == "emojis":
+            self.show_custom_emoji_settings(telegram_id)
+        elif action == "emojiset" and len(parts) == 3:
+            self.begin_custom_emoji_setup(telegram_id, parts[2])
+        elif action == "emojiclear" and len(parts) == 3:
+            self.clear_custom_emoji(telegram_id, parts[2])
         elif action == "regions":
             self.show_region_settings(telegram_id)
         elif action == "region" and len(parts) == 3:
@@ -984,7 +1251,7 @@ class TelegramBot:
         keyboard: list[list[dict[str, str]]] = []
         for order in orders[page * page_size : (page + 1) * page_size]:
             label = (
-                f"#{order['id']} · {order['country']} · "
+                f"#{order['id']} · {display_country(order['country'])} · "
                 f"{STATUS_LABELS.get(order['status'], order['status'])}"
             )
             keyboard.append(
@@ -1012,7 +1279,7 @@ class TelegramBot:
             f"Пользователь: {name} · ID {order['user_id']}",
             f"Телефон: {user.get('phone') or 'не указан'}",
             f"Направление: {order['region']}",
-            f"Страна: {order['country']}",
+            f"Страна: {display_country(order['country'])}",
             f"Создан: {order.get('created_at', 'неизвестно')}",
         ]
         if order.get("period_days"):
@@ -1134,15 +1401,24 @@ class TelegramBot:
 
     def handle_admin_message(self, message: dict[str, Any], text: str) -> None:
         if text.startswith("/start") or text == "/admin":
+            settings = get_settings()
+            if settings.get("emoji_target"):
+                settings["emoji_target"] = None
+                save_settings(settings)
             self.show_admin_home(self.admin_id)
             return
         if text == "/cancel":
             settings = get_settings()
             settings["admin_flow"] = None
+            settings["emoji_target"] = None
             save_settings(settings)
             self.send(self.admin_id, "Текущий этап сброшен.", [[{"text": "Админ-панель", "callback_data": "admin:home"}]])
             return
-        flow = get_settings().get("admin_flow")
+        settings = get_settings()
+        if settings.get("emoji_target"):
+            self.collect_custom_emoji(message)
+            return
+        flow = settings.get("admin_flow")
         if not flow:
             if text:
                 self.show_admin_home(self.admin_id)
@@ -1178,7 +1454,7 @@ class TelegramBot:
         save_settings(settings)
         message = (
             f"Оплата по заказу #{order_id}\n"
-            f"Направление: {order['region']}\nСтрана: {order['country']}\n"
+            f"Направление: {order['region']}\nСтрана: {display_country(order['country'])}\n"
             f"Период: {order['period_days']} дн.\nПакет: {order['package']}\n"
             f"Стоимость: {order['price_rub']} RUB"
         )
@@ -1339,7 +1615,7 @@ class TelegramBot:
         keyboard = [
             [
                 {
-                    "text": f"{'ВКЛЮЧИТЬ' if index in disabled else 'Закрыть'} · {name}",
+                    "text": f"{'ВКЛЮЧИТЬ' if index in disabled else 'Закрыть'} · {REGION_EMOJIS[index]} {name}",
                     "callback_data": f"adm:region:{index}",
                 }
             ]
@@ -1365,7 +1641,7 @@ class TelegramBot:
     def show_country_regions(self, telegram_id: int) -> None:
         self.require_admin(telegram_id)
         keyboard = [
-            [{"text": name, "callback_data": f"adm:countries:{index}:0"}]
+            [{"text": f"{REGION_EMOJIS[index]} {name}", "callback_data": f"adm:countries:{index}:0"}]
             for index, (name, _) in enumerate(REGIONS)
         ]
         keyboard.append([{"text": "Админ-панель", "callback_data": "admin:home"}])
@@ -1389,7 +1665,7 @@ class TelegramBot:
             keyboard.append(
                 [
                     {
-                        "text": f"{state} · {countries[country_index]}",
+                        "text": f"{state} · {display_country(countries[country_index])}",
                         "callback_data": f"adm:country:{region_index}:{country_index}",
                     }
                 ]
