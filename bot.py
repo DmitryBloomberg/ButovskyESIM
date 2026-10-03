@@ -109,7 +109,7 @@ STATUS_LABELS = {
     "new": "Новая заявка",
     "in_work": "В работе",
     "awaiting_payment": "Ожидает оплату",
-    "awaiting_confirmation": "Проверка оплаты",
+    "awaiting_confirmation": "Ожидает подтверждения оплаты",
     "awaiting_instruction": "Подготовка инструкции",
     "delivering": "Отправка инструкции",
     "delivered": "Выполнен",
@@ -309,7 +309,7 @@ def button_style(button: dict[str, Any]) -> str:
         return "danger"
     if any(word in text for word in (
         "заказать", "оформить", "подтвердить", "включить", "оплатил",
-        "отправить пользователю", "взять в работу",
+        "отправить пользователю", "взять в работу", "настроить заказ",
     )):
         return "success"
     if any(token in data for token in ("cancel", "payno", "block")):
@@ -525,6 +525,9 @@ class TelegramBot:
             self.send(telegram_id, compatibility_result(text))
             self.send_home(telegram_id)
             return
+        if state and state.get("state") == "awaiting_stay_days":
+            self.handle_stay_days(telegram_id, text, state)
+            return
         if state and state.get("state") == "awaiting_receipt":
             self.handle_receipt(message, user)
             return
@@ -704,9 +707,10 @@ class TelegramBot:
             self.show_user_orders(telegram_id)
         elif data == "user:home":
             self.send_home(telegram_id)
-        elif data == "user:pay" and len(parts) == 3:
-            self.request_receipt(telegram_id, int(parts[2]))
+        elif len(parts) == 3 and parts[0] == "user" and parts[1] == "pay":
+            self.report_payment(telegram_id, int(parts[2]))
         elif data == "user:cancel":
+            set_user_state(telegram_id, None)
             self.send_home(telegram_id)
         elif data == "admin:home":
             self.require_admin(telegram_id)
@@ -804,24 +808,57 @@ class TelegramBot:
             raise UserAlert("Это направление временно недоступно для покупки.")
         if str(country_index) in settings["disabled_countries"].get(str(region_index), []):
             raise UserAlert("Эта страна временно недоступна для покупки.")
-        keyboard = [
-            [{"text": "Оформить заказ", "callback_data": f"submit:{region_index}:{country_index}"}],
-            [{"text": "Отмена", "callback_data": "user:cancel"}],
-        ]
+        self.ask_stay_days(telegram_id, region_index, country_index)
+
+    def ask_stay_days(self, telegram_id: int, region_index: int, country_index: int) -> None:
+        if not 0 <= region_index < len(REGIONS):
+            raise UserAlert("Направление не найдено.")
+        if not 0 <= country_index < len(REGIONS[region_index][1]):
+            raise UserAlert("Страна не найдена.")
+        region = REGIONS[region_index][0]
+        country = REGIONS[region_index][1][country_index]
+        set_user_state(
+            telegram_id,
+            "awaiting_stay_days",
+            {"region_index": region_index, "country_index": country_index},
+        )
         self.send(
             telegram_id,
-            f"Направление: {REGIONS[region_index][0]}\n"
-            f"Страна: {display_country(countries[country_index])}\n\n"
-            f"{DISCLAIMER}",
-            keyboard,
+            f"Вы выбрали направление: {region}\n"
+            f"Страна: {display_country(country)}\n\n"
+            "На сколько дней вы едете? Введите количество дней числом от 1 до 365.",
+            [[{"text": "Отмена", "callback_data": "user:cancel"}]],
         )
 
     def submit_order(self, telegram_id: int, region_index: int, country_index: int) -> None:
+        # Keep older order buttons usable after an update: continue by asking for trip length.
+        self.ask_stay_days(telegram_id, region_index, country_index)
+
+    def handle_stay_days(
+        self, telegram_id: int, text: str, state: dict[str, Any]
+    ) -> None:
+        if not re.fullmatch(r"[0-9]{1,3}", text):
+            self.send(telegram_id, "Введите количество дней целым числом от 1 до 365.")
+            return
+        stay_days = int(text)
+        if not 1 <= stay_days <= 365:
+            self.send(telegram_id, "Количество дней должно быть от 1 до 365.")
+            return
+        region_index = int(state.get("region_index", -1))
+        country_index = int(state.get("country_index", -1))
+        self.create_order(telegram_id, region_index, country_index, stay_days)
+        set_user_state(telegram_id, None)
+
+    def create_order(
+        self, telegram_id: int, region_index: int, country_index: int, stay_days: int
+    ) -> None:
         # Re-check availability at submission, not just when showing the country.
         if not 0 <= region_index < len(REGIONS):
             raise UserAlert("Направление не найдено.")
         if not 0 <= country_index < len(REGIONS[region_index][1]):
             raise UserAlert("Страна не найдена.")
+        if not 1 <= stay_days <= 365:
+            raise UserAlert("Количество дней должно быть от 1 до 365.")
         settings = get_settings()
         if region_index in {int(value) for value in settings["disabled_regions"]}:
             raise UserAlert("Это направление временно недоступно для покупки.")
@@ -841,6 +878,7 @@ class TelegramBot:
             "country": REGIONS[region_index][1][country_index],
             "status": "new",
             "created_at": timestamp(),
+            "stay_days": stay_days,
             "period_days": None,
             "package": None,
             "price_rub": None,
@@ -859,7 +897,8 @@ class TelegramBot:
             f"Telegram ID: {telegram_id}\n"
             f"Телефон: {user.get('phone') or 'не указан'}\n"
             f"Направление: {order['region']}\n"
-            f"Страна: {display_country(order['country'])}"
+            f"Страна: {display_country(order['country'])}\n"
+            f"Дней пребывания: {stay_days}"
         )
         admin_keyboard = [[{"text": "Взять в работу", "callback_data": f"adm:take:{order_id}"}]]
         try:
@@ -873,7 +912,7 @@ class TelegramBot:
             return
         self.send(
             telegram_id,
-            f"Заявка #{order_id} отправлена администратору. Условия и сумму он сообщит отдельно.",
+            f"Заявка #{order_id} отправлена администратору. Он сообщит пакет, цену и реквизиты для оплаты.",
         )
 
     def show_profile(self, telegram_id: int) -> None:
@@ -952,8 +991,10 @@ class TelegramBot:
             f"Страна: {display_country(order['country'])}",
             f"Статус: {STATUS_LABELS.get(order['status'], order['status'])}",
         ]
+        if order.get("stay_days"):
+            lines.append(f"Дней пребывания: {order['stay_days']}")
         if order.get("period_days"):
-            lines.append(f"Период: {order['period_days']} дн.")
+            lines.append(f"Срок действия eSIM-пакета: {order['period_days']} дн.")
         if order.get("package"):
             lines.append(f"Пакет: {order['package']}")
         if order.get("price_rub") is not None:
@@ -961,7 +1002,7 @@ class TelegramBot:
         keyboard = [[{"text": "К активным заказам", "callback_data": "user:orders"}]]
         if order.get("status") == "awaiting_payment":
             keyboard.insert(
-                0, [{"text": "Я оплатил — отправить чек", "callback_data": f"user:pay:{order_id}"}]
+                0, [{"text": "Я оплатил(-а)", "callback_data": f"user:pay:{order_id}"}]
             )
         self.send(telegram_id, "\n".join(lines), keyboard)
 
@@ -1011,6 +1052,27 @@ class TelegramBot:
             telegram_id,
             f"Подтверждение оплаты по заказу #{order_id} получено и отправлено администратору.",
         )
+
+    def report_payment(self, telegram_id: int, order_id: int) -> None:
+        order = find_order(order_id)
+        if (
+            not order
+            or int(order["user_id"]) != telegram_id
+            or order.get("status") != "awaiting_payment"
+        ):
+            raise UserAlert("Для этого заказа сейчас нельзя сообщить об оплате.")
+        order["status"] = "awaiting_confirmation"
+        order["payment_reported_at"] = timestamp()
+        save_order(order)
+        self.send(
+            telegram_id,
+            f"Сообщение об оплате по заказу #{order_id} отправлено администратору. "
+            "Он проверит поступление денег и затем отправит инструкцию.",
+        )
+        try:
+            self.show_admin_order(self.admin_id, order_id)
+        except TelegramAPIError as exc:
+            log(f"Could not notify admin about payment for order #{order_id}: {exc.description}")
 
     def require_admin(self, telegram_id: int) -> None:
         if telegram_id != self.admin_id:
@@ -1126,6 +1188,8 @@ class TelegramBot:
             self.show_admin_order(telegram_id, int(parts[2]))
         elif action == "take" and len(parts) == 3:
             self.take_order(telegram_id, int(parts[2]))
+        elif action == "configure" and len(parts) == 3:
+            self.configure_order(telegram_id, int(parts[2]))
         elif action == "period" and len(parts) == 3:
             self.ask_period(telegram_id, int(parts[2]))
         elif action == "p" and len(parts) == 4:
@@ -1282,22 +1346,44 @@ class TelegramBot:
             f"Страна: {display_country(order['country'])}",
             f"Создан: {order.get('created_at', 'неизвестно')}",
         ]
+        if order.get("stay_days"):
+            lines.append(f"Дней пребывания: {order['stay_days']}")
         if order.get("period_days"):
-            lines.append(f"Период: {order['period_days']} дн.")
+            lines.append(f"Срок действия eSIM-пакета: {order['period_days']} дн.")
         if order.get("package"):
             lines.append(f"Пакет: {order['package']}")
         if order.get("price_rub") is not None:
             lines.append(f"Стоимость: {order['price_rub']} RUB")
+        if order.get("payment_details"):
+            lines.append(f"Реквизиты:\n{order['payment_details']}")
         keyboard: list[list[dict[str, str]]] = []
         if order.get("status") == "new":
             keyboard.append([{"text": "Взять в работу", "callback_data": f"adm:take:{order_id}"}])
-        if order.get("status") == "awaiting_confirmation":
+        if order.get("status") == "in_work":
             keyboard.append(
-                [
-                    {"text": "Подтвердить оплату", "callback_data": f"adm:payok:{order_id}"},
-                    {"text": "Отклонить чек", "callback_data": f"adm:payno:{order_id}"},
-                ]
+                [{"text": "Настроить заказ", "callback_data": f"adm:configure:{order_id}"}]
             )
+        if order.get("status") == "awaiting_confirmation":
+            if order.get("payment_reported_at"):
+                lines.append(
+                    "Пользователь сообщил об оплате. Проверьте поступление денег перед продолжением."
+                )
+                keyboard.append(
+                    [{
+                        "text": "Подтвердить оплату и добавить инструкцию",
+                        "callback_data": f"adm:sendinstruction:{order_id}",
+                    }]
+                )
+                keyboard.append(
+                    [{"text": "Оплата не поступила", "callback_data": f"adm:payno:{order_id}"}]
+                )
+            else:
+                keyboard.append(
+                    [
+                        {"text": "Подтвердить оплату", "callback_data": f"adm:payok:{order_id}"},
+                        {"text": "Отклонить чек", "callback_data": f"adm:payno:{order_id}"},
+                    ]
+                )
         if order.get("status") == "awaiting_instruction":
             keyboard.append(
                 [{"text": "Добавить инструкцию", "callback_data": f"adm:sendinstruction:{order_id}"}]
@@ -1314,7 +1400,22 @@ class TelegramBot:
         order["taken_by"] = telegram_id
         order["taken_at"] = timestamp()
         save_order(order)
-        self.ask_period(telegram_id, order_id)
+        self.show_admin_order(telegram_id, order_id)
+
+    def configure_order(self, telegram_id: int, order_id: int) -> None:
+        self.require_admin(telegram_id)
+        order = find_order(order_id)
+        if not order or order.get("status") != "in_work":
+            raise UserAlert("Сначала возьмите заказ в работу.")
+        settings = get_settings()
+        settings["admin_flow"] = {"order_id": order_id, "stage": "package"}
+        save_settings(settings)
+        self.send(
+            telegram_id,
+            f"Заказ #{order_id}: отправьте текстовое описание пакета eSIM.\n"
+            "Например: 5 ГБ на 30 дней, безлимитный интернет или любой формат поставщика.\n"
+            "Для отмены этапа отправьте /cancel.",
+        )
 
     def ask_period(self, telegram_id: int, order_id: int) -> None:
         self.require_admin(telegram_id)
@@ -1425,10 +1526,102 @@ class TelegramBot:
             return
         order_id = int(flow["order_id"])
         stage = flow.get("stage")
-        if stage == "payment_info":
+        if stage == "package":
+            self.store_package(order_id, text)
+        elif stage == "price":
+            self.store_price(order_id, text)
+        elif stage == "payment_details":
+            self.store_payment_details(order_id, text)
+        elif stage == "payment_info":
             self.store_payment_info(order_id, text)
         elif stage == "instruction":
             self.collect_instruction(order_id, message)
+
+    def store_package(self, order_id: int, text: str) -> None:
+        if not text:
+            self.send(self.admin_id, "Отправьте описание пакета обычным текстовым сообщением.")
+            return
+        if len(text) > 500:
+            self.send(self.admin_id, "Описание пакета должно быть не длиннее 500 символов.")
+            return
+        order = self.require_admin_flow(order_id, "package")
+        order["package"] = text
+        save_order(order)
+        settings = get_settings()
+        settings["admin_flow"] = {"order_id": order_id, "stage": "price"}
+        save_settings(settings)
+        self.send(self.admin_id, f"Пакет сохранён для заказа #{order_id}.\nТеперь отправьте цену в рублях, например: 1500")
+
+    def store_price(self, order_id: int, text: str) -> None:
+        try:
+            amount = Decimal(text.strip().replace(" ", "").replace(",", "."))
+        except InvalidOperation:
+            self.send(self.admin_id, "Цена должна быть числом в рублях. Например: 1500 или 1500,50.")
+            return
+        if not amount.is_finite() or amount <= 0 or amount > Decimal("10000000"):
+            self.send(self.admin_id, "Укажите цену больше 0 и не выше 10 000 000 RUB.")
+            return
+        order = self.require_admin_flow(order_id, "price")
+        order["price_rub"] = format(amount.normalize(), "f")
+        save_order(order)
+        settings = get_settings()
+        settings["admin_flow"] = {"order_id": order_id, "stage": "payment_details"}
+        save_settings(settings)
+        self.send(
+            self.admin_id,
+            f"Цена сохранена: {order['price_rub']} RUB.\n"
+            "Теперь отправьте реквизиты и текст для оплаты одним сообщением.",
+        )
+
+    def store_payment_details(self, order_id: int, text: str) -> None:
+        if not text:
+            self.send(self.admin_id, "Отправьте реквизиты и инструкцию по оплате текстовым сообщением.")
+            return
+        if len(text) > 3000:
+            self.send(self.admin_id, "Реквизиты должны быть не длиннее 3000 символов.")
+            return
+        order = self.require_admin_flow(order_id, "payment_details")
+        order["payment_details"] = text
+        save_order(order)
+        self.finalize_payment_setup(order_id, "payment_details")
+
+    def finalize_payment_setup(self, order_id: int, stage: str) -> None:
+        order = self.require_admin_flow(order_id, stage)
+        if not order.get("package") or not order.get("price_rub") or not order.get("payment_details"):
+            raise UserAlert("Для отправки пользователю заполните пакет, цену и реквизиты.")
+        order["status"] = "awaiting_payment"
+        order["payment_requested_at"] = timestamp()
+        save_order(order)
+        settings = get_settings()
+        settings["admin_flow"] = None
+        save_settings(settings)
+
+        lines = [
+            f"Заказ #{order_id}",
+            f"Направление: {order['region']}",
+            f"Страна: {display_country(order['country'])}",
+        ]
+        if order.get("stay_days"):
+            lines.append(f"Дней пребывания: {order['stay_days']}")
+        lines.extend(
+            [
+                f"Пакет: {order['package']}",
+                f"Стоимость: {order['price_rub']} RUB",
+                "",
+                "Реквизиты и инструкция по оплате:",
+                order["payment_details"],
+                "",
+                DISCLAIMER,
+                "",
+                "После перевода нажмите кнопку «Я оплатил(-а)».",
+            ]
+        )
+        self.send(
+            int(order["user_id"]),
+            "\n".join(lines),
+            [[{"text": "Я оплатил(-а)", "callback_data": f"user:pay:{order_id}"}]],
+        )
+        self.send(self.admin_id, f"Пакет, цена и реквизиты по заказу #{order_id} отправлены пользователю.")
 
     def store_payment_info(self, order_id: int, text: str) -> None:
         lines = text.splitlines()
@@ -1444,29 +1637,10 @@ class TelegramBot:
             self.send(self.admin_id, "Укажите сумму больше 0 и не выше 10 000 000 RUB.")
             return
         order = self.require_admin_flow(order_id, "payment_info")
-        order["price_rub"] = str(amount.normalize())
+        order["price_rub"] = format(amount.normalize(), "f")
         order["payment_details"] = "\n".join(lines[1:]).strip()
-        order["status"] = "awaiting_payment"
-        order["payment_requested_at"] = timestamp()
         save_order(order)
-        settings = get_settings()
-        settings["admin_flow"] = None
-        save_settings(settings)
-        message = (
-            f"Оплата по заказу #{order_id}\n"
-            f"Направление: {order['region']}\nСтрана: {display_country(order['country'])}\n"
-            f"Период: {order['period_days']} дн.\nПакет: {order['package']}\n"
-            f"Стоимость: {order['price_rub']} RUB"
-        )
-        if order["payment_details"]:
-            message += f"\n\nКак оплатить:\n{order['payment_details']}"
-        message += f"\n\n{DISCLAIMER}\n\nПосле оплаты нажмите кнопку и отправьте подтверждение."
-        self.send(
-            int(order["user_id"]),
-            message,
-            [[{"text": "Я оплатил — отправить чек", "callback_data": f"user:pay:{order_id}"}]],
-        )
-        self.send(self.admin_id, f"Счёт по заказу #{order_id} отправлен пользователю.")
+        self.finalize_payment_setup(order_id, "payment_info")
 
     @staticmethod
     def is_copyable_message(message: dict[str, Any]) -> bool:
@@ -1511,22 +1685,31 @@ class TelegramBot:
         self.require_admin(telegram_id)
         order = find_order(order_id)
         if not order or order.get("status") != "awaiting_confirmation":
-            raise UserAlert("Для заказа сейчас нет чека на проверке.")
+            raise UserAlert("Для заказа сейчас нет оплаты на проверке.")
         order["status"] = "awaiting_payment"
         order["receipt_message_id"] = None
+        order["payment_reported_at"] = None
         save_order(order)
         self.send(
             int(order["user_id"]),
-            f"Чек по заказу #{order_id} не подтверждён. Проверьте оплату и отправьте чек повторно.",
-            [[{"text": "Отправить чек", "callback_data": f"user:pay:{order_id}"}]],
+            f"Оплата по заказу #{order_id} пока не найдена. Проверьте перевод и нажмите "
+            "«Я оплатил(-а)» после отправки.",
+            [[{"text": "Я оплатил(-а)", "callback_data": f"user:pay:{order_id}"}]],
         )
-        self.send(self.admin_id, f"Чек заказа #{order_id} отклонён; статус изменён на «ожидает оплату».")
+        self.send(self.admin_id, f"Оплата по заказу #{order_id} не подтверждена; заказ возвращён к ожиданию оплаты.")
 
     def begin_instruction(self, telegram_id: int, order_id: int) -> None:
         self.require_admin(telegram_id)
         order = find_order(order_id)
-        if not order or order.get("status") not in {"awaiting_instruction", "delivering"}:
+        if not order or order.get("status") not in {
+            "awaiting_confirmation", "awaiting_instruction", "delivering"
+        }:
             raise UserAlert("Заказ ещё не ожидает инструкцию.")
+        if order.get("status") == "awaiting_confirmation":
+            if not order.get("payment_reported_at"):
+                raise UserAlert("Сначала подтвердите оплату по чеку.")
+            order["payment_confirmed_at"] = timestamp()
+            order["paid_at"] = order["payment_confirmed_at"]
         order["status"] = "awaiting_instruction"
         order.setdefault("instruction_message_ids", [])
         order.setdefault("instruction_sent_count", 0)
@@ -1536,7 +1719,8 @@ class TelegramBot:
         save_settings(settings)
         self.send(
             telegram_id,
-            f"Заказ #{order_id}: пришлите инструкцию. Принимаются текст, фотографии, документы, "
+            f"Оплата по заказу #{order_id} отмечена подтверждённой.\n"
+            "Теперь пришлите инструкцию. Принимаются текст, фотографии, документы, "
             "видео, аудио и другие сообщения. После всех материалов нажмите «Отправить пользователю»."
             "\nДля прерывания этапа используйте /cancel.",
         )
